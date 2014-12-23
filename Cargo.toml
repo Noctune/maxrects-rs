@@ -1,0 +1,8 @@
+[package]
+
+name = "maxrects"
+version = "0.0.1"
+authors = ["Mike Pedersen <mipede12@student.aau.dk>"]
+
+[dependencies.geom]
+git = "https://github.com/servo/rust-geom.git"
