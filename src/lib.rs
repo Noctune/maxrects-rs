@@ -3,107 +3,148 @@
 //! 
 //! Available here: http://clb.demon.fi/files/RectangleBinPack.pdf
 
-extern crate geom;    
+extern crate cgmath;    
 
-use std::cmp::min;
-use geom::{Rect, Size2D, Point2D};
+use std::cmp::{partial_min, Ordering};
+use cgmath::{BaseNum, Aabb, Aabb2, Vector2, Point, Point2};
 
-/// Determines if a rectangle is a superset (contains all of) another rectangle
-fn rect_supersets<T: Ord + Add<T,T>>(sup: &Rect<T>, sub: &Rect<T>) -> bool {
-    sup.origin.x < sub.origin.x + sub.size.width  &&
-    sup.origin.y < sub.origin.y + sub.size.height &&
-    sup.origin.x + sup.size.width  > sub.origin.x &&
-    sup.origin.y + sup.size.height > sub.origin.y
+trait MinMaxIteratorExt: Iterator + Sized {
+    fn min_cmp<F>(self, mut compare: F) -> Option<Self::Item> where
+        F: FnMut(&Self::Item, &Self::Item) -> Ordering
+    {
+        self.fold(None, |min, x| {
+            if let Some(minv) = min {
+                match compare(&minv, &x) {
+                    Ordering::Greater => Some(x),
+                    _ => Some(minv)
+                }
+            } else {
+                Some(x)
+            }
+        })
+    }
+
+    fn max_cmp<F>(self, mut compare: F) -> Option<Self::Item> where
+        F: FnMut(&Self::Item, &Self::Item) -> Ordering
+    {
+        self.fold(None, |min, x| {
+            if let Some(minv) = min {
+                match compare(&minv, &x) {
+                    Ordering::Less => Some(x),
+                    _ => Some(minv)
+                }
+            } else {
+                Some(x)
+            }
+        })
+    }
 }
 
-/// Calculates the best-short-side heuristic if applicaple, and returns `None`
-/// if not.
-fn bssf<T: Ord + Add<T,T> + Sub<T,T>>(sup: &Size2D<T>, sub: &Size2D<T>) -> Option<T>{
-    if sup.width >= sub.width && sup.height >= sub.height {
-        Some(min(sup.width - sub.width, sup.height - sub.height))
+impl<I> MinMaxIteratorExt for I where I: Iterator {}
+
+/// Whether a rectangle intersects another rectangle
+fn intersects<S>(sup: &Aabb2<S>, sub: &Aabb2<S>) -> bool where S: BaseNum {
+    sup.min.x < sub.max.x &&
+    sup.min.y < sub.max.y &&
+    sup.max.x > sub.min.x &&
+    sup.max.y > sup.min.y
+}
+
+/// Determines if a rectangle is a superset of (contains all of) another rectangle
+fn supersets<S>(sup: &Aabb2<S>, sub: &Aabb2<S>) -> bool where S: BaseNum {
+    sup.min.x <= sub.min.x &&
+    sup.min.y <= sub.min.y &&
+    sup.max.x >= sub.max.x &&
+    sup.max.y >= sup.max.y
+}
+
+/// Returns the best-short-side heuristic if applicaple, and `None` if not.
+fn bssf<S>(sup: &Vector2<S>, sub: &Vector2<S>) -> Option<S> where S: BaseNum {
+    if sup.x >= sub.x && sup.y >= sub.y {
+        partial_min(sup.x - sub.x, sup.x - sub.x)
     } else {
         None
     }
 }
 
-pub struct RectPacker<T> {
-    empty: Vec<Rect<T>>,
+pub struct RectPacker<S> where S: BaseNum {
+    empty: Vec<Aabb2<S>>,
 }
 
-impl<T: Clone + Ord + Add<T,T> + Sub<T,T>> RectPacker<T> {
+impl<S> RectPacker<S> where S: BaseNum {
     /// Creates a new, empty RectPacker
     #[inline]
-    pub fn new() -> RectPacker<T> {
+    pub fn new() -> RectPacker<S> {
         RectPacker{empty: Vec::new()}
     }
 
-    /// Adds a rectangle to the list of free rectangles, so that another
-    /// rectangle can be packed into it. This may be a previously packed
-    /// and does not have to be disjoint of any previous free rectangle
-    pub fn add_free(&mut self, free: Rect<T>) {
+    /// Adds a rectangle to the list of free rectangles, so that another rectangle can be packed
+    /// into it. This does not have to be disjoint of any previous free rectangle. This may be a
+    /// previously packed rectangle, but further optimal packing cannot be guarenteed in that case
+    pub fn add_free(&mut self, free: Aabb2<S>) {
         self.empty.push(free);
     }
 
-    /// Retrieves the free rectangle with the best rating (lowest heuristic)
-    /// with respect to a certain size
-    fn optimal(&self, size: &Size2D<T>) -> Option<(Point2D<T>, T)> {
+    /// Retrieves the free rectangle with the best rating (lowest heuristic) with respect to a
+    /// certain size
+    fn optimal(&self, size: &Vector2<S>) -> Option<(Point2<S>, S)> {
         self.empty.iter()
-            .filter_map(|x| if let Some(h) = bssf(&x.size, size) {Some((x,h))} else {None})
-            .min_by(|&(_, ref h)| h.clone())
-            .map(|(x,h)| (x.origin.clone(), h))
+            .filter_map(|x| if let Some(h) = bssf(&x.dim(), size) {Some((x,h))} else {None})
+            .min_cmp(|&(_, ref a), &(_, ref b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+            .map(|(x,h)| (x.min.clone(), h))
     }
 
-    /// Packs a rectangle into a free rectangle, so that it does not intersect
-    /// any previously packed rectangles. If a suitable location is found, it
-    /// is returned, otherwise `None` is returned.
-    pub fn pack(&mut self, size: &Size2D<T>) -> Option<Point2D<T>> {
+    /// Packs a rectangle into a free rectangle, so that it does not intersect any previously
+    /// packed rectangles. If a suitable location is found, it is returned, otherwise `None`
+    /// is returned.
+    pub fn pack(&mut self, size: &Vector2<S>) -> Option<Point2<S>> {
         if let Some((position, _)) = self.optimal(size) {
-            self.subtract_rect(&Rect(position.clone(), size.clone()));
+            self.subtract_rect(&Aabb2::new(position.clone(), position.add_v(size)));
             Some(position)
         } else {
             None
         }
     }
 
-    /// Removes a rectangle from the list of free rectangles, so that no
-    /// remaining free rectangle intersects with this rectangle
-    fn subtract_rect(&mut self, newrect: &Rect<T>) {
+    /// Removes a rectangle from the list of free rectangles, so that no remaining free rectangle
+    /// intersects with this rectangle
+    fn subtract_rect(&mut self, sub: &Aabb2<S>) {
         
-        // We keep track of the 'derived' rectangles. These are the rectangles
-        // at the end of the free list that were added earlier during the
-        // process. Since we know these do not intersect `newrect` they can be
-        // skipped.
+        // We keep track of the 'derived' rectangles. These are the rectangles at the end of the
+        // free list that were added earlier during the process. Since we know these do not
+        // intersect `sub` they can be skipped.
         let mut derived = 0;
         let mut index = 0;
         while index < self.empty.len() - derived {
-            let other = self.empty[index].clone();
 
-            if other.intersects(newrect) {
-                if newrect.origin.x < other.max_x() {
-                    self.empty.push(Rect(
-                        other.origin.clone(),
-                        Size2D(newrect.origin.x - other.origin.x, other.size.height.clone())));
+            let free = self.empty[index].clone();
+
+            if intersects(&free, sub) {
+                if sub.min.x > free.min.x {
+                    self.empty.push(Aabb2::new(
+                        free.min.clone(),
+                        Point2::new(sub.min.x, free.max.y)));
                     derived += 1;
                 }
 
-                if newrect.origin.y < other.max_y() {
-                    self.empty.push(Rect(
-                        other.origin.clone(),
-                        Size2D(other.size.width.clone(), newrect.origin.y - other.origin.y)));
+                if sub.min.y > free.min.y {
+                    self.empty.push(Aabb2::new(
+                        free.min.clone(),
+                        Point2::new(free.max.x, sub.min.y)));
                     derived += 1;
                 }
 
-                if newrect.max_x() < other.max_x() {
-                    self.empty.push(Rect(
-                        Point2D(newrect.max_x(), other.origin.y.clone()),
-                        Size2D(other.max_x() - newrect.max_x(), other.size.height.clone())));
+                if sub.max.x < free.max.x {
+                    self.empty.push(Aabb2::new(
+                        Point2::new(sub.max.x, free.min.y),
+                        free.max.clone()));
                     derived += 1;
                 }
 
-                if newrect.max_y() < other.max_y() {
-                    self.empty.push(Rect(
-                        Point2D(other.origin.x.clone(), newrect.max_y()),
-                        Size2D(other.size.width.clone(), other.max_y() - newrect.max_y())));
+                if sub.max.y < free.max.y {
+                    self.empty.push(Aabb2::new(
+                        Point2::new(free.min.x, sub.max.y),
+                        free.max.clone()));
                     derived += 1;
                 }
 
@@ -120,16 +161,15 @@ impl<T: Clone + Ord + Add<T,T> + Sub<T,T>> RectPacker<T> {
             }
         }
 
-        // Compares all rectangles pairwise and removes any that is a subset
-        // of another rectangle
+        // Compares all rectangles pairwise and removes any that is a subset of another rectangle
         let mut i = 0;
         while i < self.empty.len() {
             let mut j = i + 1;
             while j < self.empty.len() {
                 let (a,b) = (self.empty[i].clone(), self.empty[j].clone());
-                if rect_supersets(&a,&b) {
+                if supersets(&a,&b) {
                     self.empty.swap_remove(j);
-                } else if rect_supersets(&b,&a) {
+                } else if supersets(&b,&a) {
                     self.empty.swap_remove(i);
                     j = i + 1;
                 } else {
@@ -141,84 +181,107 @@ impl<T: Clone + Ord + Add<T,T> + Sub<T,T>> RectPacker<T> {
         }
     }
 
-    /// Packs a list rectangles by continually packing the best (by heuristic)
-    /// packed rectangle. It may not be possible to pack all, elements, in
-    /// which case the iterator will only yield the elements that were
-    /// successfully packed.
-    pub fn pack_global<'a, U, F: for<'b>FnMut<(&'b U,),Size2D<T>>>
-        (&'a mut self, sizes: Vec<U>, mapping: F) -> GlobalPackIter<'a,T,U,F> {
+    /// Maps a number of objects to rectangle sizes using `mapping` and continually packs the 
+    /// object with the best (by heuristic) possible packing. If not all elements can be packed, 
+    /// the iterator will only yield the elements that were successfully packed.
+    ///
+    /// Global packing is often better than normal packing, but is also slower.
+    pub fn pack_global_by<'a, U, F>(&'a mut self, sizes: Vec<U>, mapping: F)
+        -> GlobalPackIter<'a,S,U,F> where
+        F:  for<'b>FnMut(&'b U) -> Vector2<S>
+    {
         GlobalPackIter{
             packer: self,
             input: sizes,
             mapping: mapping,
         }
     }
+
+    /// Packs a list rectangles by continually packing the rectangle with the best (by heuristic)
+    /// packing. If not all elements can be packed, the iterator will only yield the elements that
+    /// were successfully packed.
+    ///
+    /// Global packing is often better than normal packing, but is also slower.
+    pub fn pack_global<'a>(&'a mut self, sizes: Vec<Vector2<S>>) ->
+        GlobalPackIter<'a, S, Vector2<S>, fn(&Vector2<S>) -> Vector2<S>> where
+        S: Clone
+    {
+        fn identity<S>(a: &Vector2<S>) -> Vector2<S> where S: Clone {
+            a.clone()
+        }
+
+        GlobalPackIter{
+            packer: self,
+            input: sizes,
+            mapping: identity as fn(&Vector2<S>) -> Vector2<S>,
+        }
+    }
 }
 
-pub struct GlobalPackIter<'a,T: 'a,U,F> {
-    packer: &'a mut RectPacker<T>,
+pub struct GlobalPackIter<'a, S: 'a, U, F> where
+    F: for<'b>FnMut(&'b U) -> Vector2<S>
+{
+    packer: &'a mut RectPacker<S>,
     input: Vec<U>,
     mapping: F,
 }
 
-impl<'a,T,U,F> GlobalPackIter<'a,T,U,F> {
-    /// Whether all elements have been packed. It might not be possible to pack
-    /// all elements, in which case this will return false even though the
-    /// iterator yields `None`.
+impl<'a,S,U,F> GlobalPackIter<'a,S,U,F> where F: for<'b>FnMut(&'b U) -> Vector2<S> {
+    /// Whether all elements have been packed. It might not be possible to pack all elements,
+    /// in which case this will return false even though the iterator yields `None`.
     pub fn all_packed(&self) -> bool {
         self.input.is_empty()
     }
 }
 
-impl<'a, T: Clone + Ord + Add<T,T> + Sub<T,T>, U, F: for<'a>FnMut<(&'a U,),Size2D<T>>>
-    Iterator<(U,Rect<T>)> for GlobalPackIter<'a,T,U,F> {
 
-    fn size_hint(&self) -> (uint, Option<uint>) {
+impl<'a,S,U,F> Iterator for GlobalPackIter<'a,S,U,F> where
+    S: BaseNum, F: for<'b>FnMut(&'b U) -> Vector2<S> {
+
+    type Item = (U, Aabb2<S>);
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
         (0, Some(self.input.len()))
     }
 
-    fn next(&mut self) -> Option<(U,Rect<T>)> {
-        if self.input.is_empty() {
-            None
+    fn next(&mut self) -> Option<(U,Aabb2<S>)> {
+        let GlobalPackIter{
+            ref mut packer,
+            ref mut input,
+            ref mut mapping,
+        } = *self;
+
+        let min = input.iter()
+            .enumerate()
+            .filter_map(|(index,x)| {
+                let size = mapping(x);
+                if let Some((point,heuristic)) = packer.optimal(&size) {
+                    Some((index, Aabb2::new(point, point.add_v(&size)), heuristic))
+                } else {
+                    None
+                }
+            })
+            .min_cmp(|&(_, _, ref a), &(_, _, ref b)| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+
+        if let Some((index, rect, _)) = min {
+            let x = input.swap_remove(index);
+            packer.subtract_rect(&rect);
+            Some((x, rect))
         } else {
-            let GlobalPackIter{
-                ref mut packer,
-                ref mut input,
-                ref mut mapping,
-            } = *self;
-
-            let min = input.iter()
-                .enumerate()
-                .filter_map(|(index,x)| {
-                    let size = mapping.call_mut((x,));
-                    if let Some((point,heuristic)) = packer.optimal(&size) {
-                        Some((index, Rect(point, size), heuristic))
-                    } else {
-                        None
-                    }
-                })
-                .min_by(|&(_,_, ref heuristic)| heuristic.clone());
-
-            if let Some((index, rect, _)) = min {
-                let x = input.swap_remove(index).unwrap();
-                packer.subtract_rect(&rect);
-                Some((x, rect))
-            } else {
-                None
-            }
+            None
         }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use geom::{Rect, Point2D, Size2D};
-    use super::{RectPacker};
+    use cgmath::{BaseNum, Aabb, Aabb2, Vector2, Point, Point2};
+    use super::{intersects, RectPacker};
 
-    fn valid_pack<T: Ord + Clone + Add<T,T> + Sub<T,T>>(rectangles: &Vec<Rect<T>>) -> bool {
+    fn valid_pack<S: BaseNum>(rectangles: &Vec<Aabb2<S>>) -> bool {
         for (i,x) in rectangles.iter().enumerate() {
             for (j,y) in rectangles.iter().enumerate() {
-                if i != j && x.intersects(y) {
+                if i != j && intersects(x, y) {
                     return false;
                 }
             }
@@ -230,18 +293,18 @@ mod test {
     #[test]
     fn global_pack() {
         let mut packer = RectPacker::new();
-        packer.add_free(Rect(Point2D(0,0), Size2D(100,100)));
-        let a = vec![Size2D(1u,10), Size2D(9,9), Size2D(9,1)];
-        assert!(valid_pack(&packer.pack_global(a, |&x| x).map(|(_,x)| x).collect()));
+        packer.add_free(Aabb2::new(Point2::new(0,0), Point2::new(100,100)));
+        let a = vec![Vector2::new(1,10), Vector2::new(9,9), Vector2::new(9,1)];
+        assert!(valid_pack(&packer.pack_global(a).map(|(_,x)| x).collect()));
     }
 
     #[test]
-    fn nonglobal_pack() {
+    fn normal_pack() {
         let mut packer = RectPacker::new();
-        packer.add_free(Rect(Point2D(0u,0), Size2D(100,100)));
+        packer.add_free(Aabb2::new(Point2::new(0,0), Point2::new(100,100)));
 
-        println!("{}", packer.pack(&Size2D(1,10)).unwrap());
-        println!("{}", packer.pack(&Size2D(9,9)).unwrap());
-        println!("{}", packer.pack(&Size2D(9,1)).unwrap());
+        println!("{:?}", packer.pack(&Vector2::new(1,10)).unwrap());
+        println!("{:?}", packer.pack(&Vector2::new(9,9)).unwrap());
+        println!("{:?}", packer.pack(&Vector2::new(9,1)).unwrap());
     }
 }
